@@ -35,7 +35,7 @@ def save_model(model, epoch):
     save_dict = {"encoder": model.state_dict(), "epoch": epoch}
 
     try:
-        path_name = path_save + "_epoch_" + str(epoch) + ".pt"
+        path_name = path_save + "_epoch_" + str(epoch) + "_p0"+".pt"
         torch.save(save_dict, path_name)
     except:
         print("Problem saving checkpoint")
@@ -59,11 +59,23 @@ if __name__ == "__main__":
     config = prepare_args_pretrain(config)
 
     # Load Data
+    # loader = get_jepa_loaders(
+    #     config["path_data"],
+    #     config["batch_size"],
+    #     config["ratio_patches"],
+    #     config["mask_ratio"],
+    # )
+
     loader = get_jepa_loaders(
         config["path_data"],
         config["batch_size"],
         config["ratio_patches"],
         config["mask_ratio"],
+        split="train",
+        patch_size=config["patch_size"],
+        seed=config["seed"],
+        val_fraction=config["val_fraction"],
+        test_fraction=config["test_fraction"],
     )
 
     input_dim = len(loader.dataset[0][0][0])

@@ -12,15 +12,29 @@ import math
 import random
 import numpy as np
 
+def set_seed(seed):
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 def prepare_args(config):
 
-    seed = random.randint(0, 100)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.manual_seed(seed)
-
+    # seed = random.randint(0, 100)
+    # np.random.seed(seed)
+    # random.seed(seed)
+    # torch.manual_seed(seed)
     parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+    "--seed",
+    type=int,
+    default=config.get("seed", 42),
+    )
+
     parser.add_argument("--data", type=str, default="uniform_uni_data")
     parser.add_argument("--notes", type=str, default="")
     parser.add_argument("--name_model", type=str, default="pre_train")
@@ -99,12 +113,14 @@ def prepare_args(config):
     )
 
     args = parser.parse_args()
+    set_seed(args.seed)
+    config["seed"] = args.seed
     config["model"] = args.name_model.lower()
     config["data"] = args.data
     config["lr"] = args.lr
     config["batch_size"] = args.batch_size
     config["lr_pretrain"] = args.lr_pretrain
-    config["seed"] = seed
+    # config["seed"] = seed
     config["ratio_patches"] = args.ratio_patches
     config["checkpoint_to_use"] = args.checkpoint_to_use
 
@@ -152,12 +168,18 @@ def prepare_args(config):
 
 def prepare_args_pretrain(config):
 
-    seed = random.randint(0, 100)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.manual_seed(seed)
+    # seed = random.randint(0, 100)
+    # np.random.seed(seed)
+    # random.seed(seed)
+    # torch.manual_seed(seed)
 
     parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=config.get("seed", 42),
+    )
     parser.add_argument("--data", type=str, default="weather")
 
     parser.add_argument("--mask_ratio", type=float, default=config["mask_ratio"])
@@ -191,7 +213,7 @@ def prepare_args_pretrain(config):
     )
 
     args = parser.parse_args()
-
+    set_seed(args.seed)
     config["mask_ratio"] = args.mask_ratio
     config["lr"] = args.lr
     config["batch_size"] = args.batch_size
@@ -199,7 +221,7 @@ def prepare_args_pretrain(config):
     config["ratio_patches"] = args.ratio_patches
     config["data"] = args.data
 
-    config["seed"] = seed
+    config["seed"] = args.seed
 
     config["path_data"] = "./data/" + args.data + "/" + args.data + ".csv"
 

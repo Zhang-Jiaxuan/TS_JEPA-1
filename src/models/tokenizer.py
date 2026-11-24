@@ -43,18 +43,30 @@ class TS_Tokenizer(nn.Module):
         # Linear layer to adapt the last flattened output to the embedding dimension
         self.fc = nn.Linear(embed_dim * conv_output_length, embed_dim)
 
+    # def forward(self, x):
+    #     batch_size, num_patches, length_patch = x.shape
+    #     x = x.view(-1, 1, length_patch)
+
+    #     # Apply the Conv
+    #     x = self.proj(x)
+
+    #     # Flatten the output
+    #     x = x.view(x.size(0), -1)
+
+    #     # Linear layer to transform to embedding dimension needed for Encoder
+    #     x = self.fc(x)
+    #     x = x.view(batch_size, num_patches, -1)
+
+    #     return x
     def forward(self, x):
         batch_size, num_patches, length_patch = x.shape
-        x = x.view(-1, 1, length_patch)
 
-        # Apply the Conv
+        # reshape 可以处理非连续的 patch 切片；view 不可以
+        x = x.reshape(-1, 1, length_patch)
+
         x = self.proj(x)
-
-        # Flatten the output
-        x = x.view(x.size(0), -1)
-
-        # Linear layer to transform to embedding dimension needed for Encoder
+        x = x.reshape(x.size(0), -1)
         x = self.fc(x)
-        x = x.view(batch_size, num_patches, -1)
+        x = x.reshape(batch_size, num_patches, -1)
 
         return x

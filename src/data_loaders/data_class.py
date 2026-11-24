@@ -1,170 +1,252 @@
-import pandas as pd
-import torch
+# src/data_loaders/data_class.py
+
 import random
 
-class CSVDataLoader():
-    """
-        Data Loader for the JEPA -- generates the necessary masked parts.
-        ---
-            - Load the data from the CSV
-            - Normalize the data
-            - Divide into Train/Test/Val
-    """
-    def __init__(self,
-                 path_data,
-                 batch_size=32,
-                 series_split_size=100,
-                 patch_size=10,
-                 mask_ratio=0.15):
+import numpy as np
+import torch
+from torch.utils.data import Dataset
 
-        input_variables = "OT"
-        timestamp_col = "date"
-        validation_fraction = 0.05
-        test_fraction = 0.3
+from .p0_protocol import SeriesProtocol, load_series_protocol
 
-        # Load and preprocess data
-        df = pd.read_csv(
-            path_data,
-            parse_dates=[timestamp_col],
-            low_memory=False,
-            sep=",",
+
+def _get_protocol(
+    path_data: str | None,
+    protocol: SeriesProtocol | None,
+    val_fraction: float,
+    test_fraction: float,
+) -> SeriesProtocol:
+    if protocol is not None:
+        return protocol
+    if path_data is None:
+        raise ValueError("Provide either path_data or protocol")
+    return load_series_protocol(
+        path_data,
+        columns=("OT",),
+        val_fraction=val_fraction,
+        test_fraction=test_fraction,
+    )
+
+
+def _split_tensors(protocol: SeriesProtocol):
+    values = torch.as_tensor(
+        np.asarray(protocol.values).reshape(-1),
+        dtype=torch.float32,
+    )
+    train_end = protocol.split.train_end
+    val_end = protocol.split.val_end
+    return (
+        values[:train_end],
+        values[train_end:val_end],
+        values[val_end:],
+    )
+
+
+class CSVDataLoader(Dataset):
+    """
+    原 TS-JEPA 随机 Patch mask 数据集。
+
+    每个样本返回：
+        patches:          [num_patches, patch_size]
+        mask_indices:     [num_masked]
+        non_mask_indices: [num_visible]
+
+    注意：mask_indices 保留 random.sample 的顺序，与原实现一致。
+    """
+
+    def __init__(
+        self,
+        path_data: str | None = None,
+        batch_size: int = 32,
+        series_split_size: int = 320,
+        patch_size: int = 32,
+        mask_ratio: float = 0.15,
+        split: str = "train",
+        protocol: SeriesProtocol | None = None,
+        val_fraction: float = 0.05,
+        test_fraction: float = 0.30,
+    ):
+        super().__init__()
+
+        if patch_size <= 0 or series_split_size <= 0:
+            raise ValueError("patch_size and series_split_size must be positive")
+        if series_split_size % patch_size != 0:
+            raise ValueError(
+                "series_split_size must be divisible by patch_size"
+            )
+        if not 0.0 < mask_ratio < 1.0:
+            raise ValueError("mask_ratio must lie strictly between 0 and 1")
+
+        self.protocol = _get_protocol(
+            path_data, protocol, val_fraction, test_fraction
         )
-
-        # Normalize float columns
-        fcols = df.select_dtypes("float").columns
-        df[fcols] = df[fcols].apply(pd.to_numeric, downcast="float")
-        df_mean = df[fcols].mean(0)
-        df_std = df[fcols].std(0)
-        df[fcols] = (df[fcols] - df_mean) / df_std
-
-        # Convert integer columns to numeric
-        icols = df.select_dtypes("integer").columns
-        df[icols] = df[icols].apply(pd.to_numeric, downcast="integer")
-
-        # Sort by timestamp
-        df.sort_values(by=[timestamp_col], inplace=True)
-
-        # Split into train, validation, and test sets
-        val_len = int(len(df) * validation_fraction)
-        test_len = int(len(df) * test_fraction)
-        train_len = len(df) - val_len - test_len
-        df = torch.tensor(df[input_variables].values).float()
-        train_df, val_df, test_df = torch.split(df, [train_len, val_len, test_len])
-
-        # Store data
-        self.train_df = train_df
-        self.val_df = val_df
-        self.test_df = test_df
-
-        # Parameters for patching and masking
+        self.split = split
+        self.batch_size = batch_size  # 兼容原构造参数
         self.series_split_size = series_split_size
         self.patch_size = patch_size
         self.mask_ratio = mask_ratio
-        self.time_series_list = train_df
+        self.num_patches = series_split_size // patch_size
 
-    def __getitem__(self, idx):
-        # Split the original time series into smaller time series chunks
-        ts = self.time_series_list
-        num_splits = len(ts) // self.series_split_size
-        split_series = [ts[i*self.series_split_size:(i+1)*self.series_split_size] for i in range(num_splits)]
+        if self.num_patches < 2:
+            raise ValueError("Random masking requires at least two patches")
 
-        # Select the series based on the index (assuming batched access)
-        selected_series = split_series[idx % len(split_series)]
+        self.train_df, self.val_df, self.test_df = _split_tensors(
+            self.protocol
+        )
 
-        # Now divide the selected smaller time series into patches
-        num_patches = len(selected_series) // self.patch_size
-        patches = [selected_series[i*self.patch_size:(i+1)*self.patch_size] for i in range(num_patches)]
+        split_series = {
+            "train": self.train_df,
+            "val": self.val_df,
+            "test": self.test_df,
+        }
+        if split not in split_series:
+            raise ValueError(f"Unknown split: {split}")
 
-        # Convert patches to tensor
-        patches_tensor = torch.stack(patches)
+        self.time_series_list = split_series[split]
 
-        # Create the mask for the patches
-        num_masked_patches = int(num_patches * self.mask_ratio)
-        mask_indices = random.sample(range(num_patches), num_masked_patches)
-        non_mask_indices = [i for i in range(num_patches) if i not in mask_indices]
+        # 与原实现一致：以不重叠的完整窗口取样，舍弃 split 尾部不足
+        # series_split_size 的数据。没有跨 split 取上下文。
+        self.starts = self.protocol.window_starts(
+            split,
+            history_length=series_split_size,
+            future_length=0,
+            stride=series_split_size,
+        )
 
-        # Separate masked and non-masked patches
-        masked_patches = torch.stack([patches_tensor[i] for i in mask_indices])
-        non_masked_patches = torch.stack([patches_tensor[i] for i in non_mask_indices])
+        n_masked = int(self.num_patches * mask_ratio)
+        if not 1 <= n_masked < self.num_patches:
+            raise ValueError(
+                f"mask_ratio={mask_ratio} gives {n_masked} masked patches "
+                f"out of {self.num_patches}; need at least one masked "
+                "and one visible patch"
+            )
+        self.num_masked = n_masked
 
-        mask_indices = torch.tensor(mask_indices)
-        non_mask_indices = torch.tensor(non_mask_indices)
+    def __len__(self) -> int:
+        return len(self.starts)
 
-        return patches_tensor, mask_indices, non_mask_indices
+    def __getitem__(self, idx: int):
+        start = int(self.starts[idx])
 
-    def __len__(self):
-        # Number of smaller time series created from the full series
-        return len(self.time_series_list) // self.series_split_size
+        history, _ = self.protocol.get_window(
+            self.split,
+            start,
+            history_length=self.series_split_size,
+        )
+        patches = torch.as_tensor(
+            np.asarray(history).reshape(
+                self.num_patches, self.patch_size
+            ).copy(),
+            dtype=torch.float32,
+        )
+
+        # 不能在 P0 阶段排序：原 Predictor 和 teacher 的目标索引
+        # 必须继续按原样配对。
+        mask_indices_list = random.sample(
+            range(self.num_patches), self.num_masked
+        )
+        mask_set = set(mask_indices_list)
+        non_mask_indices_list = [
+            i for i in range(self.num_patches) if i not in mask_set
+        ]
+
+        mask_indices = torch.tensor(
+            mask_indices_list, dtype=torch.long
+        )
+        non_mask_indices = torch.tensor(
+            non_mask_indices_list, dtype=torch.long
+        )
+
+        return patches, mask_indices, non_mask_indices
 
 
-class EvaluationDataLoader():
+class EvaluationDataLoader(Dataset):
     """
-        Similar to the previous class of JEPA but rather used for evaluation in
-        the downstream tasks
-        ---
-            - Load the data from the CSV.
-            - Normalize the data
-            - Divide into Train/Test/Val
+    原预测下游任务：连续 context_size 个 Patch -> 下一个 Patch。
+
+    返回：
+        context_patches: [context_size, patch_size]
+        target_patch:    [patch_size]
     """
-    def __init__(self, path_data, patch_size=32, context_size=10):
+
+    def __init__(
+        self,
+        path_data: str | None = None,
+        patch_size: int = 32,
+        context_size: int = 10,
+        split: str = "train",
+        protocol: SeriesProtocol | None = None,
+        val_fraction: float = 0.05,
+        test_fraction: float = 0.30,
+    ):
+        super().__init__()
+
+        if patch_size <= 0 or context_size <= 0:
+            raise ValueError("patch_size and context_size must be positive")
+
+        self.protocol = _get_protocol(
+            path_data, protocol, val_fraction, test_fraction
+        )
         self.patch_size = patch_size
         self.context_size = context_size
+        self.split = split
 
-        input_variables = "OT"
-        timestamp_col = "date"
-        validation_fraction = 0.05
-        test_fraction = 0.3
+        self.train_df, self.val_df, self.test_df = _split_tensors(
+            self.protocol
+        )
+        split_series = {
+            "train": self.train_df,
+            "val": self.val_df,
+            "test": self.test_df,
+        }
+        if split not in split_series:
+            raise ValueError(f"Unknown split: {split}")
 
-        df = pd.read_csv(path_data, parse_dates=[timestamp_col],
-                                                    low_memory=False, sep=",")
+        self.series = split_series[split]
 
-        fcols = df.select_dtypes("float").columns
-        df[fcols] = df[fcols].apply(pd.to_numeric, downcast="float")
+        # 兼容旧脚本可能访问的属性。这里只截取本 split 内完整 Patch。
+        n_complete = len(self.series) // patch_size
+        self.patches_tensor = self.series[
+            : n_complete * patch_size
+        ].reshape(n_complete, patch_size)
 
-        df_mean = df[fcols].mean(0)
-        df_std = df[fcols].std(0)
+        total_length = (context_size + 1) * patch_size
 
-        df[fcols] = (df[fcols] - df_mean) / df_std
+        # stride=patch_size：与原代码「窗口每次前进一个 Patch」
+        # 的样本定义一致；每个 target 都留在指定 split 内。
+        self.starts = self.protocol.window_starts(
+            split,
+            history_length=context_size * patch_size,
+            future_length=patch_size,
+            stride=patch_size,
+        )
 
+        if total_length > len(self.series):
+            raise ValueError(
+                f"{split} split has {len(self.series)} points; "
+                f"need at least {total_length}"
+            )
 
-        icols = df.select_dtypes("integer").columns
-        df[icols] = df[icols].apply(pd.to_numeric, downcast="integer")
+    def __len__(self) -> int:
+        return len(self.starts)
 
-        df.sort_values(by=[timestamp_col], inplace=True)
+    def __getitem__(self, idx: int):
+        start = int(self.starts[idx])
 
-        # Split into train, validation, and test sets
-        val_len = int(len(df) * validation_fraction)
-        test_len = int(len(df) * test_fraction)
-        train_len = len(df) - val_len - test_len
-        df = torch.tensor(df[input_variables].values).float()
-        train_df, val_df, test_df = torch.split(df, [train_len, val_len, test_len])
+        context, target = self.protocol.get_window(
+            self.split,
+            start,
+            history_length=self.context_size * self.patch_size,
+            future_length=self.patch_size,
+        )
 
-        # Store data
-        self.train_df = train_df
-        self.val_df = val_df
-        self.test_df = test_df
-
-        self.series = self.train_df
-
-        # Split the entire time series into patches
-        self.patches_tensor = self.split_into_patches(self.series, self.patch_size)
-
-    def split_into_patches(self, series, patch_size):
-        num_patches = len(series) // patch_size
-        patches = [series[i * patch_size:(i + 1) * patch_size] for i in range(num_patches)]
-        return torch.stack(patches)  # Shape will be (num_patches, patch_size)
-
-    def __len__(self):
-        # Number of available samples based on the context size
-        return len(self.patches_tensor) - self.context_size
-
-    def __getitem__(self, idx):
-        # Here we ensure that each time we return a context window of 10 patches
-        if idx + self.context_size + 1 > len(self.patches_tensor):
-            raise IndexError("Index out of range for context window")
-
-        # Get context patches (previous 10) and the target patch (next one)
-        context_patches = self.patches_tensor[idx:idx + self.context_size]
-        target_patch = self.patches_tensor[idx + self.context_size]
-
+        context_patches = torch.as_tensor(
+            np.asarray(context).reshape(
+                self.context_size, self.patch_size
+            ).copy(),
+            dtype=torch.float32,
+        )
+        target_patch = torch.as_tensor(
+            np.asarray(target).reshape(self.patch_size).copy(),
+            dtype=torch.float32,
+        )
         return context_patches, target_patch

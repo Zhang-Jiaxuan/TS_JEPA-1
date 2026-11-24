@@ -46,12 +46,38 @@ if __name__ == "__main__":
     print("Load data")
     config["path_data"] = "./data/" + config["data"] + "/" + config["data"] + ".csv"
 
-    loader = get_evaluation_loaders(
-        config["path_data"],
-        config["batch_size"],
-        config["ratio_patches"],
-        config["mask_ratio"],
+    # loader = get_evaluation_loaders(
+    #     config["path_data"],
+    #     config["batch_size"],
+    #     config["ratio_patches"],
+    #     config["mask_ratio"],
+    # )
+
+    from src.data_loaders.p0_protocol import load_series_protocol
+
+    protocol = load_series_protocol(
+        path=config["path_data"],
+        val_fraction=config["val_fraction"],
+        test_fraction=config["test_fraction"],
     )
+
+    loader_kwargs = dict(
+        path=config["path_data"],
+        batch_size=config["batch_size"],
+        ratio_patches=config["ratio_patches"],
+        mask_ratio=config["mask_ratio"],
+        protocol=protocol,
+        patch_size=config["patch_size"],
+        seed=config["seed"],
+    )
+
+    train_loader = get_evaluation_loaders(**loader_kwargs, split="train")
+    val_loader = get_evaluation_loaders(**loader_kwargs, split="val")
+    test_loader = get_evaluation_loaders(**loader_kwargs, split="test")
+
+    # 暂时供原初始化代码使用；随后必须逐一修改训练和测试循环。
+    loader = train_loader
+
 
     input_dim = len(loader.dataset[0][0][0])
     # Encoder
@@ -101,7 +127,7 @@ if __name__ == "__main__":
     )
 
     name_loader = torch.load(
-        config["path_save"] + path_name + ".pt", map_location=torch.device("cpu")
+        config["path_save"] + path_name + "_p0"+".pt", map_location=torch.device("cpu")
     )["encoder"]
     encoder.load_state_dict(name_loader)
     print("Model loaded")
